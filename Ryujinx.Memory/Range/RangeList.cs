@@ -11,17 +11,25 @@ namespace Ryujinx.Memory.Range
     public class RangeList<T> : IEnumerable<T> where T : IRange
     {
         private const int ArrayGrowthSize = 32;
-
+        protected readonly bool UsesOverlappingRanges = !(typeof(T).GetInterface(nameof(INonOverlappingRange)) != null);
         protected readonly List<T> Items;
+        protected readonly IntervalTree<ulong, T> Tree;
 
-        public int Count => Items.Count;
+        public int Count => UsesOverlappingRanges ? Tree.Count: Items.Count;
 
         /// <summary>
         /// Creates a new range list.
         /// </summary>
         public RangeList()
         {
-            Items = new List<T>();
+            if (UsesOverlappingRanges)
+            {
+                Tree = new IntervalTree<ulong, T>();
+            }
+            else
+            {
+                Items = new List<T>();
+            }
         }
 
         /// <summary>
@@ -30,14 +38,20 @@ namespace Ryujinx.Memory.Range
         /// <param name="item">The item to be added</param>
         public void Add(T item)
         {
-            int index = BinarySearch(item.Address);
-
-            if (index < 0)
+            if (UsesOverlappingRanges)
             {
-                index = ~index;
+                Tree.Add(item.Address, item.EndAddress, item);
             }
-
-            Items.Insert(index, item);
+            else
+            {
+                int index = BinarySearch(item.Address);
+                if (index < 0)
+                {
+                    index = ~index;
+                }
+                Items.Insert(index, item);
+            }
+            
         }
 
         /// <summary>
@@ -47,34 +61,41 @@ namespace Ryujinx.Memory.Range
         /// <returns>True if the item was removed, or false if it was not found</returns>
         public bool Remove(T item)
         {
-            int index = BinarySearch(item.Address);
-
-            if (index >= 0)
+            if(UsesOverlappingRanges)
             {
-                while (index > 0 && Items[index - 1].Address == item.Address)
-                {
-                    index--;
-                }
-
-                while (index < Items.Count)
-                {
-                    if (Items[index].Equals(item))
-                    {
-                        Items.RemoveAt(index);
-
-                        return true;
-                    }
-
-                    if (Items[index].Address > item.Address)
-                    {
-                        break;
-                    }
-
-                    index++;
-                }
+                return Tree.Delete(new Interval<ulong>(item.Address, item.EndAddress));
             }
+            else
+            {
+                int index = BinarySearch(item.Address);
 
-            return false;
+                if (index >= 0)
+                {
+                    while (index > 0 && Items[index - 1].Address == item.Address)
+                    {
+                        index--;
+                    }
+
+                    while (index < Items.Count)
+                    {
+                        if (Items[index].Equals(item))
+                        {
+                            Items.RemoveAt(index);
+
+                            return true;
+                        }
+
+                        if (Items[index].Address > item.Address)
+                        {
+                            break;
+                        }
+
+                        index++;
+                    }
+                }
+
+                return false;
+            }
         }
 
         /// <summary>
@@ -88,7 +109,15 @@ namespace Ryujinx.Memory.Range
         /// <returns>The overlapping item, or the default value for the type if none found</returns>
         public T FindFirstOverlap(T item)
         {
-            return FindFirstOverlap(item.Address, item.Size);
+            if (UsesOverlappingRanges)
+            {
+                Tree.GetFirstIntervalOverlappingWith(new Interval<ulong>(item.Address, item.EndAddress), out T value);
+                return value;
+            }
+            else
+            {
+                return FindFirstOverlap(item.Address, item.Size);
+            }
         }
 
         /// <summary>
@@ -103,14 +132,25 @@ namespace Ryujinx.Memory.Range
         /// <returns>The overlapping item, or the default value for the type if none found</returns>
         public T FindFirstOverlap(ulong address, ulong size)
         {
-            int index = BinarySearch(address, size);
-
-            if (index < 0)
+            if(UsesOverlappingRanges)
             {
-                return default(T);
-            }
+                ulong endAddress = address + size;
+                if (address >= endAddress) return default(T);
 
-            return Items[index];
+                Tree.GetFirstIntervalOverlappingWith(new Interval<ulong>(address, endAddress), out T value);
+                return value;
+            }
+            else
+            {
+                int index = BinarySearch(address, size);
+
+                if (index < 0)
+                {
+                    return default(T);
+                }
+
+                return Items[index];
+            }
         }
 
         /// <summary>
@@ -121,7 +161,14 @@ namespace Ryujinx.Memory.Range
         /// <returns>The number of overlapping items found</returns>
         public int FindOverlaps(T item, ref T[] output)
         {
-            return FindOverlaps(item.Address, item.Size, ref output);
+            if(UsesOverlappingRanges)
+            {
+                return Tree.GetIntervalsOverlappingWith(new Interval<ulong>(item.Address, item.EndAddress), ref output);
+            }
+            else
+            {
+                return FindOverlaps(item.Address, item.Size, ref output);
+            }
         }
 
         /// <summary>
@@ -133,29 +180,39 @@ namespace Ryujinx.Memory.Range
         /// <returns>The number of overlapping items found</returns>
         public int FindOverlaps(ulong address, ulong size, ref T[] output)
         {
-            int outputIndex = 0;
-
-            ulong endAddress = address + size;
-
-            foreach (T item in Items)
+            if(UsesOverlappingRanges)
             {
-                if (item.Address >= endAddress)
-                {
-                    break;
-                }
+                ulong endAddress = address + size;
+                if (address >= endAddress) return 0;
 
-                if (item.OverlapsWith(address, size))
+                return Tree.GetIntervalsOverlappingWith(new Interval<ulong>(address, endAddress), ref output);
+            }
+            else
+            {
+                int outputIndex = 0;
+
+                ulong endAddress = address + size;
+
+                foreach (T item in Items)
                 {
-                    if (outputIndex == output.Length)
+                    if (item.Address >= endAddress)
                     {
-                        Array.Resize(ref output, outputIndex + ArrayGrowthSize);
+                        break;
                     }
 
-                    output[outputIndex++] = item;
-                }
-            }
+                    if (item.OverlapsWith(address, size))
+                    {
+                        if (outputIndex == output.Length)
+                        {
+                            Array.Resize(ref output, outputIndex + ArrayGrowthSize);
+                        }
 
-            return outputIndex;
+                        output[outputIndex++] = item;
+                    }
+                }
+
+                return outputIndex;
+            }
         }
 
         /// <summary>
@@ -188,32 +245,39 @@ namespace Ryujinx.Memory.Range
         /// <returns>The number of overlapping items found</returns>
         public int FindOverlapsNonOverlapping(ulong address, ulong size, ref T[] output)
         {
-            // This is a bit faster than FindOverlaps, but only works
-            // when none of the items on the list overlaps with each other.
-            int outputIndex = 0;
-
-            int index = BinarySearch(address, size);
-
-            if (index >= 0)
+            if(UsesOverlappingRanges)
             {
-                while (index > 0 && Items[index - 1].OverlapsWith(address, size))
-                {
-                    index--;
-                }
+                return FindOverlaps(address, size, ref output);
+            }
+            else
+            {
+                // This is a bit faster than FindOverlaps, but only works
+                // when none of the items on the list overlaps with each other.
+                //int outputIndex = 0;
 
-                do
+                int index = BinarySearch(address, size);
+                int outputIndex = 0;
+                if (index >= 0)
                 {
-                    if (outputIndex == output.Length)
+                    while (index > 0 && Items[index - 1].OverlapsWith(address, size))
                     {
-                        Array.Resize(ref output, outputIndex + ArrayGrowthSize);
+                        index--;
                     }
 
-                    output[outputIndex++] = Items[index++];
-                }
-                while (index < Items.Count && Items[index].OverlapsWith(address, size));
-            }
+                    do
+                    {
+                        if (outputIndex == output.Length)
+                        {
+                            Array.Resize(ref output, outputIndex + ArrayGrowthSize);
+                        }
 
-            return outputIndex;
+                        output[outputIndex++] = Items[index++];
+                    }
+                    while (index < Items.Count && Items[index].OverlapsWith(address, size));
+                }
+
+                return outputIndex;
+            }
         }
 
         /// <summary>
@@ -263,7 +327,7 @@ namespace Ryujinx.Memory.Range
         /// <returns>List index of the item, or complement index of nearest item with lower value on the list</returns>
         private int BinarySearch(ulong address)
         {
-            int left  = 0;
+            int left = 0;
             int right = Items.Count - 1;
 
             while (left <= right)
@@ -300,7 +364,7 @@ namespace Ryujinx.Memory.Range
         /// <returns>List index of the item, or complement index of nearest item with lower value on the list</returns>
         private int BinarySearch(ulong address, ulong size)
         {
-            int left  = 0;
+            int left = 0;
             int right = Items.Count - 1;
 
             while (left <= right)
@@ -331,12 +395,26 @@ namespace Ryujinx.Memory.Range
 
         public IEnumerator<T> GetEnumerator()
         {
-            return Items.GetEnumerator();
+            if(UsesOverlappingRanges)
+            {
+                return Tree.GetEnumerator();
+            }
+            else
+            {
+                return Items.GetEnumerator();
+            }
         }
 
         IEnumerator IEnumerable.GetEnumerator()
         {
-            return Items.GetEnumerator();
+            if (UsesOverlappingRanges)
+            {
+                return Tree.GetEnumerator();
+            }
+            else
+            {
+                return Items.GetEnumerator();
+            }
         }
     }
 }
